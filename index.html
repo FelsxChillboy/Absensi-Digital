@@ -1,10 +1,12 @@
+<!DOCTYPE html>
 <html lang="id">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Absensi QR</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<!-- Gunakan versi lebih stabil dari CDN yang berbeda -->
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
 :root{
   --bg:#F7F6F2; --surface:#FFFFFF; --text:#1C1A17; --muted:#6B675F;
@@ -46,9 +48,10 @@ main{max-width:720px; margin:0 auto; padding:20px 16px 60px}
 .card{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:14px}
 .peserta-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px}
 .peserta-item{background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; text-align:center}
-.peserta-item .qr{display:flex; justify-content:center; margin-bottom:8px}
+.peserta-item .qr{display:flex; justify-content:center; margin-bottom:8px; min-height:120px; align-items:center}
 .peserta-item .nama{font-size:.85rem; font-weight:600; margin-bottom:2px}
 .peserta-item .kode{font-size:.78rem; color:var(--muted)}
+.qr-loading{font-size:.75rem; color:var(--muted)}
 label{display:block; font-size:.82rem; color:var(--muted); margin-bottom:4px}
 input[type=text]{
   width:100%; padding:9px 10px; border-radius:6px; border:1px solid var(--border);
@@ -64,6 +67,7 @@ button.primary{
 #scan-status.err{display:block; background:rgba(224,135,110,.15); border:1px solid var(--danger); color:var(--text)}
 .log{margin-top:16px; font-size:.82rem; color:var(--muted)}
 .log div{padding:4px 0; border-bottom:1px solid var(--border)}
+#btn-retry-scanner{display:none; margin-top:10px}
 @media print{
   header,nav,.no-print{display:none !important}
   main{padding:0; max-width:none}
@@ -97,6 +101,7 @@ button.primary{
     <div class="card">
       <div id="reader"></div>
       <div id="scan-status"></div>
+      <button class="primary no-print" id="btn-retry-scanner" onclick="retryScanner()">🔄 Coba Lagi Kamera</button>
       <div class="log" id="log"></div>
     </div>
   </div>
@@ -113,88 +118,205 @@ const peserta = [
   {id:"REG-007d", nama:"PAN-PEL"}
 ];
 
+// ── Generate QR ──────────────────────────────────────────────
+function generateQR(container, text) {
+  // Coba QRCode.js dulu, fallback ke Google Charts API
+  if (typeof QRCode !== 'undefined') {
+    try {
+      new QRCode(container, {
+        text: text,
+        width: 120,
+        height: 120,
+        correctLevel: QRCode.CorrectLevel.M
+      });
+      return;
+    } catch(e) {}
+  }
+  // Fallback: gunakan Google Charts API (tidak butuh JS library)
+  const img = document.createElement('img');
+  img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=' + encodeURIComponent(text);
+  img.width = 120;
+  img.height = 120;
+  img.alt = text;
+  container.innerHTML = '';
+  container.appendChild(img);
+}
+
 const grid = document.getElementById('peserta-grid');
-peserta.forEach(p=>{
+peserta.forEach(p => {
   const item = document.createElement('div');
-  item.className='peserta-item';
+  item.className = 'peserta-item';
+
   const qrDiv = document.createElement('div');
-  qrDiv.className='qr';
+  qrDiv.className = 'qr';
+  qrDiv.innerHTML = '<span class="qr-loading">Memuat QR...</span>';
   item.appendChild(qrDiv);
-  const nama = document.createElement('div'); nama.className='nama'; nama.textContent=p.nama;
-  const kode = document.createElement('div'); kode.className='kode'; kode.textContent=p.id;
-  item.appendChild(nama); item.appendChild(kode);
+
+  const nama = document.createElement('div');
+  nama.className = 'nama';
+  nama.textContent = p.nama;
+
+  const kode = document.createElement('div');
+  kode.className = 'kode';
+  kode.textContent = p.id;
+
+  item.appendChild(nama);
+  item.appendChild(kode);
   grid.appendChild(item);
-  new QRCode(qrDiv, {text:p.id, width:120, height:120});
+
+  // Generate setelah DOM siap
+  setTimeout(() => {
+    qrDiv.innerHTML = '';
+    generateQR(qrDiv, p.id);
+  }, 100);
 });
 
-// nav
-const navGen = document.getElementById('nav-generate');
+// ── Nav ──────────────────────────────────────────────────────
+const navGen  = document.getElementById('nav-generate');
 const navScan = document.getElementById('nav-scan');
-const viewGen = document.getElementById('view-generate');
+const viewGen  = document.getElementById('view-generate');
 const viewScan = document.getElementById('view-scan');
-let scannerStarted = false;
 
-function showView(name){
-  if(name==='scan'){
-    viewGen.style.display='none'; viewScan.style.display='block';
-    navScan.classList.add('active'); navGen.classList.remove('active');
+let html5QrScanner = null;
+let scannerRunning  = false;
+
+function showView(name) {
+  if (name === 'scan') {
+    viewGen.style.display  = 'none';
+    viewScan.style.display = 'block';
+    navScan.classList.add('active');
+    navGen.classList.remove('active');
     startScanner();
   } else {
-    viewScan.style.display='none'; viewGen.style.display='block';
-    navGen.classList.add('active'); navScan.classList.remove('active');
+    viewScan.style.display = 'none';
+    viewGen.style.display  = 'block';
+    navGen.classList.add('active');
+    navScan.classList.remove('active');
+    stopScanner();
   }
-  location.hash = name==='scan' ? 'scan' : 'generate';
+  location.hash = name === 'scan' ? 'scan' : 'generate';
 }
-navGen.onclick=()=>showView('generate');
-navScan.onclick=()=>showView('scan');
 
-// endpoint storage
+navGen.onclick  = () => showView('generate');
+navScan.onclick = () => showView('scan');
+
+// ── Endpoint storage ──────────────────────────────────────────
 let endpointUrl = '';
-try{ endpointUrl = localStorage.getItem('absensi-endpoint') || ''; }catch(e){}
+try { endpointUrl = localStorage.getItem('absensi-endpoint') || ''; } catch(e) {}
 document.getElementById('endpoint').value = endpointUrl;
-document.getElementById('save-endpoint').onclick=()=>{
+
+document.getElementById('save-endpoint').onclick = () => {
   endpointUrl = document.getElementById('endpoint').value.trim();
-  try{ localStorage.setItem('absensi-endpoint', endpointUrl); }catch(e){}
-  setStatus('URL endpoint disimpan.','ok');
+  try { localStorage.setItem('absensi-endpoint', endpointUrl); } catch(e) {}
+  setStatus('✅ URL endpoint disimpan.', 'ok');
 };
 
-function setStatus(msg,type){
+// ── Status & log ──────────────────────────────────────────────
+function setStatus(msg, type) {
   const el = document.getElementById('scan-status');
-  el.textContent = msg; el.className = type;
+  el.textContent = msg;
+  el.className = type;
 }
-function addLog(msg){
+
+function addLog(msg) {
   const log = document.getElementById('log');
   const row = document.createElement('div');
   row.textContent = msg;
   log.prepend(row);
 }
 
-async function kirimAbsensi(id){
-  if(!endpointUrl){ setStatus('Isi dulu URL Web App Apps Script di atas.','err'); return; }
-  const p = peserta.find(x=>x.id===id);
+// ── Kirim absensi ─────────────────────────────────────────────
+// Debounce: cegah scan ganda dalam 3 detik
+let lastScanned = '';
+let lastScannedTime = 0;
+
+async function kirimAbsensi(id) {
+  const now = Date.now();
+  if (id === lastScanned && now - lastScannedTime < 3000) return; // abaikan duplikat
+  lastScanned = id;
+  lastScannedTime = now;
+
+  if (!endpointUrl) {
+    setStatus('⚠️ Isi dulu URL Web App Apps Script di atas.', 'err');
+    return;
+  }
+
+  const p    = peserta.find(x => x.id === id);
   const nama = p ? p.nama : '(tidak dikenal)';
-  try{
-    const res = await fetch(endpointUrl + '?id=' + encodeURIComponent(id) + '&nama=' + encodeURIComponent(nama));
+
+  setStatus('Mengirim data ' + nama + '...', 'ok');
+
+  try {
+    const res  = await fetch(endpointUrl + '?id=' + encodeURIComponent(id) + '&nama=' + encodeURIComponent(nama));
     const text = await res.text();
-    setStatus(nama + ' (' + id + ') — ' + text, 'ok');
+    setStatus('✅ ' + nama + ' (' + id + ') — ' + text, 'ok');
     addLog(new Date().toLocaleTimeString() + ' — ' + nama + ' (' + id + ')');
-  }catch(err){
-    setStatus('Gagal mengirim data: cek URL / koneksi.', 'err');
+  } catch(err) {
+    setStatus('❌ Gagal kirim data. Cek URL atau koneksi internet.', 'err');
   }
 }
 
-function startScanner(){
-  if(scannerStarted) return;
-  scannerStarted = true;
-  const qr = new Html5Qrcode('reader');
-  qr.start({facingMode:'environment'}, {fps:10, qrbox:220},
-    (decodedText)=>{ kirimAbsensi(decodedText.trim()); },
-    ()=>{}
-  ).catch(()=>{ setStatus('Tidak bisa mengakses kamera.', 'err'); });
+// ── Scanner kamera ────────────────────────────────────────────
+function startScanner() {
+  if (scannerRunning) return;
+
+  // Reset elemen reader agar tidak konflik
+  const readerEl = document.getElementById('reader');
+  readerEl.innerHTML = '';
+
+  html5QrScanner = new Html5Qrcode('reader');
+  scannerRunning  = true;
+
+  document.getElementById('btn-retry-scanner').style.display = 'none';
+
+  Html5Qrcode.getCameras()
+    .then(cameras => {
+      if (!cameras || cameras.length === 0) {
+        setStatus('❌ Tidak ada kamera ditemukan di perangkat ini.', 'err');
+        document.getElementById('btn-retry-scanner').style.display = 'block';
+        scannerRunning = false;
+        return;
+      }
+
+      // Pilih kamera belakang kalau ada
+      const cam = cameras.find(c => /back|rear|environment/i.test(c.label)) || cameras[cameras.length - 1];
+
+      html5QrScanner.start(
+        cam.id,
+        { fps: 10, qrbox: { width: 220, height: 220 } },
+        (decodedText) => { kirimAbsensi(decodedText.trim()); },
+        () => {} // abaikan error frame biasa
+      ).catch(err => {
+        setStatus('❌ Tidak bisa akses kamera: ' + (err.message || err), 'err');
+        document.getElementById('btn-retry-scanner').style.display = 'block';
+        scannerRunning = false;
+      });
+    })
+    .catch(err => {
+      setStatus('❌ Tidak bisa akses kamera. Izinkan akses kamera di browser.', 'err');
+      document.getElementById('btn-retry-scanner').style.display = 'block';
+      scannerRunning = false;
+    });
 }
 
-// initial route
-if(location.hash.replace('#','')==='scan'){ showView('scan'); } else { showView('generate'); }
+function stopScanner() {
+  if (html5QrScanner && scannerRunning) {
+    html5QrScanner.stop().catch(() => {});
+    scannerRunning = false;
+  }
+}
+
+function retryScanner() {
+  scannerRunning = false;
+  startScanner();
+}
+
+// ── Initial route ─────────────────────────────────────────────
+if (location.hash.replace('#', '') === 'scan') {
+  showView('scan');
+} else {
+  showView('generate');
+}
 </script>
 </body>
 </html>
